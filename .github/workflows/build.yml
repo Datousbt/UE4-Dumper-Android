@@ -1,0 +1,158 @@
+name: Build UE4 Dumper
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  # ─── ARM64 (主流Android手机) ──────────────────────────────────────
+  build-arm64:
+    runs-on: ubuntu-latest
+    name: ARM64 (arm64-v8a)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: false
+
+      - name: Configure CMake
+        run: |
+          cmake -B build/arm64 \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_VERSION=21 \
+            -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+            -DCMAKE_ANDROID_NDK=${{ steps.setup-ndk.outputs.ndk-path }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_ANDROID_STL=c++_static
+
+      - name: Build
+        run: cmake --build build/arm64 --config Release -j$(nproc)
+
+      - name: Strip binary
+        run: |
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip build/arm64/ue4_dumper
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ue4_dumper_arm64-v8a
+          path: build/arm64/ue4_dumper
+
+  # ─── x86_64 (Android模拟器 / Linux PC) ───────────────────────────
+  build-x86_64:
+    runs-on: ubuntu-latest
+    name: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: false
+
+      - name: Configure CMake
+        run: |
+          cmake -B build/x86_64 \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_VERSION=21 \
+            -DCMAKE_ANDROID_ARCH_ABI=x86_64 \
+            -DCMAKE_ANDROID_NDK=${{ steps.setup-ndk.outputs.ndk-path }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_ANDROID_STL=c++_static
+
+      - name: Build
+        run: cmake --build build/x86_64 --config Release -j$(nproc)
+
+      - name: Strip binary
+        run: |
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip build/x86_64/ue4_dumper
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ue4_dumper_x86_64
+          path: build/x86_64/ue4_dumper
+
+  # ─── 本地 Linux 编译 (快速验证) ──────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    name: Linux (native)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+
+      - name: Configure CMake
+        run: cmake -B build/linux -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/linux --config Release -j$(nproc)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ue4_dumper_linux_x86_64
+          path: build/linux/ue4_dumper
+
+  # ─── Release 打包 (仅 push 触发) ──────────────────────────────────
+  release:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [build-arm64, build-x86_64, build-linux]
+    runs-on: ubuntu-latest
+    name: Create Release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ue4_dumper_*
+          merge-multiple: true
+          path: dist/
+
+      - name: Show artifacts
+        run: ls -lh dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "UE4 Dumper - Nightly Build"
+          tag_name: "build-${{ github.run_number }}"
+          body: |
+            ## UE4 Function Address Finder - Android Edition
+
+            🔧 自动编译构建 #${{ github.run_number }}
+            提交: ${{ github.sha }}
+            分支: ${{ github.ref_name }}
+
+            ### 二进制文件
+
+            | 文件 | 架构 | 说明 |
+            |---|---|---|
+            | `ue4_dumper_arm64-v8a` | ARM64 | 主流 Android 手机 |
+            | `ue4_dumper_x86_64` | x86_64 | Android 模拟器 |
+            | `ue4_dumper_linux_x86_64` | x86_64 | Linux PC (本地编译) |
+
+            ### 使用方法
+
+            ```bash
+            # 推送到手机
+            adb push ue4_dumper_arm64-v8a /data/local/tmp/ue4_dumper
+            adb shell su -c 'chmod +x /data/local/tmp/ue4_dumper'
+
+            # 扫描 UE4 游戏
+            adb shell su -c '/data/local/tmp/ue4_dumper --list'
+            adb shell su -c '/data/local/tmp/ue4_dumper <PID> --ue4-version 426'
+            ```
+          files: |
+            dist/*
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
