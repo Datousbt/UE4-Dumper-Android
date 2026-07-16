@@ -286,7 +286,7 @@ bool scanTNameEntryArray(const ProcessHandle& ph, const MemoryRegion& region, in
                     if (indirectVal == chunkPtr) {
                         // GNames is a pointer TO the TNameEntryArray
                         printf("[*] TNameEntryArray chunk at 0x%lx (indirect, nameOff=0x%x, entry[1]=%s)\n",
-                               chunkPtr, nameOff, name1);
+                               chunkPtr, nOff, name1);
                         printf("[*] GNames: 0x%lx (derefs to 0x%lx)\n", directAddr, chunkPtr);
                         gProfile.GNameOffset = toOffset(directAddr, modBase);
                         gProfile.UseFNamePool = false;
@@ -298,7 +298,7 @@ bool scanTNameEntryArray(const ProcessHandle& ph, const MemoryRegion& region, in
                     int64_t indirect2 = Algorithm::ReadAs<int64_t>(ph, indirectVal);
                     if (indirect2 == chunkPtr) {
                         printf("[*] TNameEntryArray chunk at 0x%lx (double-indirect, nameOff=0x%x, entry[1]=%s)\n",
-                               chunkPtr, nameOff, name1);
+                               chunkPtr, nOff, name1);
                         printf("[*] GNames: 0x%lx → 0x%lx → 0x%lx\n", directAddr, indirectVal, chunkPtr);
                         gProfile.GNameOffset = toOffset(directAddr, modBase);
                         gProfile.UseFNamePool = false;
@@ -309,7 +309,7 @@ bool scanTNameEntryArray(const ProcessHandle& ph, const MemoryRegion& region, in
                     // Try direct (chunk IS at directAddr)
                     if (chunkPtr == directAddr) {
                         printf("[*] TNameEntryArray direct at 0x%lx (nameOff=0x%x, entry[1]=%s)\n",
-                               directAddr, nameOff, name1);
+                               directAddr, nOff, name1);
                         printf("[*] GNames: 0x%lx (direct)\n", directAddr);
                         gProfile.GNameOffset = toOffset(directAddr, modBase);
                         gProfile.UseFNamePool = false;
