@@ -45,7 +45,7 @@ bool detectX86_64(const ProcessHandle& ph, int64_t moduleBase, size_t moduleSize
         if (!ph.readMemory(region.start, buffer.data(), region.size())) continue;
 
         auto foundAddr = Algorithm::ScanforStringRef(
-            ph, buffer, (const uint16_t*)targetStr,
+            ph, buffer, targetStr,
             static_cast<int64_t>(region.start), 3,
             "GetEngineVersion()");
 
