@@ -482,48 +482,69 @@ bool find(const ProcessHandle& ph, int64_t moduleBase, size_t moduleSize) {
 
 #if PLATFORM_ARM64
     if (gProfile.UseFNamePool) {
-        // UE 4.23+ FNamePool: use dedicated scanner
         printf("[*] UE 4.23+ detected, scanning for FNamePool...\n");
         printf("[-] FNamePool ARM64 scanner not yet fully implemented\n");
     } else {
         // Pre-4.23 TNameEntryArray: try multiple methods
+        printf("[*] Pre-4.23 detected, searching TNameEntryArray...\n");
+
+        // Count scannable regions for debug
+        int dataRegions = 0, codeRegions = 0;
+        for (const auto& region : ph.regions) {
+            if (region.isReadable() && !region.isExecutable()) dataRegions++;
+            if (region.isReadable() && region.isExecutable()) codeRegions++;
+        }
+        printf("[*] Regions: %d data, %d code\n", dataRegions, codeRegions);
 
         // Method A: scan data sections for TNameEntryArray pattern
-        printf("[*] Method A: TNameEntryArray pattern scan...\n");
+        printf("[*] Method A: TNameEntryArray pattern scan in data sections...\n");
         {
             std::vector<std::thread> threads;
+            int scanned = 0;
             for (const auto& region : ph.regions) {
                 if (gFound) break;
                 if (!region.isReadable() || region.isExecutable()) continue;
+                scanned++;
+                printf("[*]   scanning data region 0x%lx-0x%lx (%zu MB)...\n",
+                       region.start, region.end, region.size() / 1048576);
                 threads.emplace_back([&ph, &region, moduleBase]() {
                     scanTNameEntryArray(ph, region, moduleBase);
                 });
             }
             for (auto& t : threads) t.join();
+            printf("[*] Method A scanned %d data regions, gFound=%d\n", scanned, (int)gFound);
         }
 
-        // Method B: string reference scan
+        // Method B: string reference scan in code sections
         if (!gFound) {
-            printf("[*] Method B: string reference scan...\n");
+            printf("[*] Method B: string reference scan in code sections...\n");
             std::vector<std::thread> threads;
+            int scanned = 0;
             for (const auto& region : ph.regions) {
                 if (gFound) break;
                 if (!region.isReadable() || !region.isExecutable()) continue;
+                scanned++;
                 threads.emplace_back([&ph, &region, moduleBase]() {
                     scanViaStringRef(ph, region, moduleBase);
                 });
             }
             for (auto& t : threads) t.join();
+            printf("[*] Method B scanned %d code regions, gFound=%d\n", scanned, (int)gFound);
         }
 
-        // Method C: brute-force "None" scan
+        // Method C: brute-force "None" scan in ALL readable regions
         if (!gFound) {
-            printf("[*] Method C: brute-force 'None' scan...\n");
+            printf("[*] Method C: brute-force scan in all readable regions...\n");
+            int scanned = 0;
             for (const auto& region : ph.regions) {
                 if (gFound) break;
-                if (!region.isReadable() || region.isExecutable()) continue;
+                if (!region.isReadable()) continue;
+                scanned++;
+                printf("[*]   scanning region 0x%lx-0x%lx (%zu MB)...\n",
+                       region.start, region.end, region.size() / 1048576);
                 scanBruteForce(ph, region, moduleBase);
             }
+            printf("[*] Method C scanned %d regions, gFound=%d\n", scanned, (int)gFound);
         }
     }
 #endif
