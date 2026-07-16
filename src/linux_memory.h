@@ -23,9 +23,25 @@
 #include <sstream>
 #include <algorithm>
 #include <sys/uio.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <elf.h>
+
+// process_vm_readv syscall number (not always in NDK headers)
+#ifndef __NR_process_vm_readv
+#if defined(__aarch64__)
+#define __NR_process_vm_readv 270
+#elif defined(__arm__)
+#define __NR_process_vm_readv 376
+#elif defined(__x86_64__)
+#define __NR_process_vm_readv 310
+#elif defined(__i386__)
+#define __NR_process_vm_readv 347
+#else
+#define __NR_process_vm_readv 0
+#endif
+#endif
 
 // ─── Platform detection ────────────────────────────────────────────────
 #if defined(__aarch64__) || defined(__arm64__)
@@ -123,10 +139,11 @@ inline void ProcessHandle::close() {
 inline bool ProcessHandle::readMemory(uint64_t addr, void* buf, size_t len) const {
     if (!buf || len == 0) return false;
 
-    // Method 1: process_vm_readv (preferred, works without opening /proc/pid/mem)
+    // Method 1: syscall process_vm_readv (works on all Linux >=3.2, no NDK wrapper needed)
     struct iovec local_iov = { buf, len };
     struct iovec remote_iov = { reinterpret_cast<void*>(addr), len };
-    ssize_t nread = process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0);
+    ssize_t nread = syscall(__NR_process_vm_readv, (long)pid,
+                            &local_iov, 1ul, &remote_iov, 1ul, 0ul);
     if (nread == static_cast<ssize_t>(len)) {
         return true;
     }

@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Optimize for size (important for mobile deployment)
-set(CMAKE_CXX_FLAGS_RELEASE "-Os -s -ffunction-sections -fdata-sections -flto")
+set(CMAKE_CXX_FLAGS_RELEASE "-Os -ffunction-sections -fdata-sections -flto")
 set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-Wl,--gc-sections -Wl,--strip-all -flto")
 
 # Position-independent code (needed for some Android targets)
