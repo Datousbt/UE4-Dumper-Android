@@ -1,0 +1,25 @@
+# Build output
+build/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Binary output
+ue4_dumper
+*.profile
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!android.toolchain.cmake
