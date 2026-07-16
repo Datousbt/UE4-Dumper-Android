@@ -33,8 +33,9 @@ namespace EngineVersion {
 
 #if PLATFORM_X86_64
 bool detectX86_64(const ProcessHandle& ph, int64_t moduleBase, size_t moduleSize) {
-    const wchar_t* targetStr = L"%sunreal-v%i-%s.dmp";
-    size_t strLen = wcslen(targetStr);
+    const char16_t* targetStr = u"%sunreal-v%i-%s.dmp";
+    size_t strLen = 0;
+    while (targetStr[strLen]) strLen++;
 
     for (const auto& region : ph.regions) {
         if (!region.isReadable() || region.path.empty()) continue;
@@ -153,7 +154,7 @@ bool method1_x86(const ProcessHandle& ph, const MemoryRegion& region) {
     std::vector<uint8_t> buffer(region.size());
     if (!ph.readMemory(region.start, buffer.data(), region.size())) return false;
 
-    const wchar_t* str = L"Hardcoded name '%s' at index %i was duplicated (or unexpected concurrency). Existing entry is '%s'.";
+    const char16_t* str = u"Hardcoded name '%s' at index %i was duplicated (or unexpected concurrency). Existing entry is '%s'.";
     auto strAddr = Algorithm::ScanforStringRef(ph, buffer, str,
         static_cast<int64_t>(region.start), 3, "FName::GetNames()");
 
@@ -577,7 +578,7 @@ bool findX86_64(const ProcessHandle& ph, int64_t moduleBase) {
     }
 
     // Method 2: String reference
-    const wchar_t* str = L"Failed to load package '%s' into a new game world.";
+    const char16_t* str = u"Failed to load package '%s' into a new game world.";
     for (const auto& region : ph.regions) {
         if (!region.isReadable()) continue;
 
@@ -682,7 +683,7 @@ namespace FunctionFinder {
 int64_t findStaticLoadObject(const ProcessHandle& ph,
                               const std::vector<uint8_t>& buffer,
                               int64_t regionBase) {
-    const wchar_t* str = L"Failed to find object '{ClassName} {OuterName}.{ObjectName}'";
+    const char16_t* str = u"Failed to find object '{ClassName} {OuterName}.{ObjectName}'";
     auto strAddr = Algorithm::ScanforStringRef(ph, buffer, str, regionBase, 3,
         "UObject::StaticLoadObject()");
     if (strAddr) {
@@ -703,7 +704,7 @@ int64_t findStaticLoadObject(const ProcessHandle& ph,
 int64_t findSpawnActor(const ProcessHandle& ph,
                         const std::vector<uint8_t>& buffer,
                         int64_t regionBase) {
-    const wchar_t* str = L"SpawnActor failed.";
+    const char16_t* str = u"SpawnActor failed.";
     auto strAddr = Algorithm::ScanforStringRef(ph, buffer, str, regionBase, 3,
         "UWorld::SpawnActor()");
     if (strAddr) {
@@ -741,7 +742,7 @@ int64_t findSpawnActor(const ProcessHandle& ph,
 int64_t findCallFunctionByNameWithArguments(const ProcessHandle& ph,
                                              const std::vector<uint8_t>& buffer,
                                              int64_t regionBase) {
-    const wchar_t* str = L"'{Message}': Bad or missing property '{PropertyName}'";
+    const char16_t* str = u"'{Message}': Bad or missing property '{PropertyName}'";
     auto strAddr = Algorithm::ScanforStringRef(ph, buffer, str, regionBase, 3,
         "UObject::CallFunctionByNameWithArguments()");
     if (strAddr) {

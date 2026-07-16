@@ -128,15 +128,15 @@ inline bool CheckNSkipJump(const ProcessHandle& ph, int64_t AddrIn, int64_t& Add
 #if PLATFORM_X86_64
 inline int64_t ScanforStringRef(const ProcessHandle& ph,
                                 const std::vector<uint8_t>& buffer,
-                                const uint16_t* String,      // wide char string
+                                const char16_t* String,      // UTF-16 string (UE4 wide char)
                                 int64_t AbsoluteRegionStartAddress,
                                 int32_t offset,
                                 const std::string& Name) {
     int64_t result = 0;
     size_t StringLength = 0;
-    const uint16_t* p = String;
+    const char16_t* p = String;
     while (*p++) StringLength++;
-    size_t StringBytes = StringLength * sizeof(uint16_t);
+    size_t StringBytes = StringLength * sizeof(char16_t);
 
     for (size_t i = 0; i < buffer.size(); i++) {
         if (i + offset >= buffer.size()) return result;
@@ -151,7 +151,7 @@ inline int64_t ScanforStringRef(const ProcessHandle& ph,
 
             int64_t absoluteStringAddr = AbsoluteRegionStartAddress + i + offset + relative + 4;
 
-            std::vector<uint16_t> stringBuffer(StringLength);
+            std::vector<char16_t> stringBuffer(StringLength);
             if (ph.readMemory(static_cast<uint64_t>(absoluteStringAddr),
                               stringBuffer.data(), StringBytes)) {
                 bool match = true;
