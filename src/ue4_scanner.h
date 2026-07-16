@@ -219,105 +219,137 @@ bool method2_x86(const ProcessHandle& ph, const MemoryRegion& region) {
 }
 #endif // PLATFORM_X86_64
 
-// ─── ARM64 GNames (TNameEntryArray, pre-4.23) ──────────────────────
+// ─── ARM64 GNames scanner ──────────────────────────────────────────
 #if PLATFORM_ARM64
 
-// Method A: scan for TNameEntryArray pattern in data sections
-// Structure: array of 8-byte pointers to FNameEntry chunks (0x4000 entries each)
-// Per SDK Offsets.h: TNameEntryArray = getPtr(GNames) or getPtr(getPtr(GNames))
-// UE 4.22: Index@0x8, Name@0xC  |  UE 4.18: Index@0x0, Name@0x10
+// Helper: decode FNameEntry header (4.23+ FNamePool format)
+// Returns string length, or -1 if invalid
+static int decodeFNameLen(uint16_t header) {
+    int wide = header & 1;
+    int len = (header >> 6) & 0x3FF;
+    if (len <= 0 || len > 250) return -1;
+    return len;
+}
+
+// FNamePool scanner (UE 4.23+):
+// GNames + 0x30 = FNamePool data
+// FNamePool.Blocks[0] = first block, data starts at offset 0 in block
+// Entry 0: 2-byte header + "None" → "ByteProperty" → ...
+// Pattern: find "None" at entry+2, verify header, trace back to GNames
+bool scanFNamePool(const ProcessHandle& ph, const MemoryRegion& region, int64_t modBase) {
+    if (gFound) return false;
+
+    size_t scanSize = std::min(region.size(), (size_t)0x400000);
+    std::vector<uint8_t> buf(scanSize);
+    if (!ph.readMemory(region.start, buf.data(), scanSize)) return false;
+
+    // Scan for "None" followed by valid entry sequence
+    for (size_t pos = 2; pos + 10 < buf.size() && !gFound; pos++) {
+        // Check for "None" at current position
+        if (memcmp(&buf[pos], "None", 4) != 0) continue;
+
+        // Read potential FNameEntry header (2 bytes before "None")
+        uint16_t header = *(uint16_t*)(&buf[pos - 2]);
+        int len = decodeFNameLen(header);
+        if (len != 4) continue; // "None" is 4 chars
+
+        // Calculate offset to next entry
+        int entrySize = 2 + len; // header + string
+        entrySize = (entrySize + 1) & ~1; // align to 2
+
+        if (pos - 2 + entrySize + 2 + 12 > buf.size()) continue; // need room for next entry
+
+        // Check next entry header
+        uint16_t nextHeader = *(uint16_t*)(&buf[pos - 2 + entrySize]);
+        int nextLen = decodeFNameLen(nextHeader);
+        if (nextLen <= 0 || nextLen > 50) continue;
+
+        // Read next entry string
+        char nextStr[64] = {};
+        memcpy(nextStr, &buf[pos - 2 + entrySize + 2], std::min(nextLen, 63));
+
+        // Verify next entry is a known UE4 type name
+        const char* knownNames[] = {"ByteProperty","IntProperty","BoolProperty",
+            "FloatProperty","ObjectProperty","NameProperty",nullptr};
+        bool validNext = false;
+        for (int k = 0; knownNames[k]; k++) {
+            if (strncmp(nextStr, knownNames[k], nextLen) == 0) { validNext = true; break; }
+        }
+        if (!validNext) continue;
+
+        printf("[*] Found FNamePool entries: [0]=None, [1]=%.*s\n", nextLen, nextStr);
+
+        // Block 0 starts at the header of entry 0
+        int64_t block0Start = static_cast<int64_t>(region.start) + pos - 2;
+
+        // Now find which pointer points to block0Start
+        // FNamePool.Blocks[i] → block, and Blocks[0] = block0Start
+        // Scan for 8-byte value == block0Start in data sections
+        for (const auto& r : ph.regions) {
+            if (gFound) break;
+            if (!r.isReadable() || r.isExecutable()) continue;
+
+            size_t nq = std::min(r.size() / 8, (size_t)0x80000);
+            std::vector<int64_t> ptrs(nq);
+            if (!ph.readMemory(r.start, ptrs.data(), nq * 8)) continue;
+
+            for (size_t pi = 0; pi < ptrs.size() && !gFound; pi++) {
+                if (ptrs[pi] != block0Start) continue;
+
+                // Found Blocks[0] = block0Start
+                int64_t blocksArray = static_cast<int64_t>(r.start) + pi * 8;
+                // FNamePool = blocksArray - 0x10 (Blocks is at offset 0x10)
+                int64_t fNamePool = blocksArray - Offsets::FNamePool::Blocks;
+                // GNames = FNamePool - 0x30 (GNamesOffset)
+                int64_t gNames = fNamePool - Offsets::FNamePool::GNamesOffset;
+
+                printf("[*] FNamePool at 0x%lx, Block0 at 0x%lx\n", fNamePool, block0Start);
+                printf("[*] GNames (FNamePool): 0x%lx\n", gNames);
+                gProfile.GNameOffset = toOffset(gNames, modBase);
+                gProfile.UseFNamePool = true;
+                gFound = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// TNameEntryArray fallback (pre-4.23) - simplified
 bool scanTNameEntryArray(const ProcessHandle& ph, const MemoryRegion& region, int64_t modBase) {
     if (gFound) return false;
 
-    // Determine correct offsets based on engine version
-    int nameOffset, indexOffset;
-    if (gProfile.IsUsing4_22) {
-        nameOffset = 0xC;   // 4.22+
-        indexOffset = 0x8;
-    } else {
-        nameOffset = 0x10;  // pre-4.22
-        indexOffset = 0x0;
-    }
-    // Also try alternate: some games use 0xC even pre-4.22 (PUBG etc.)
+    int nameOff = gProfile.IsUsing4_22 ? 0xC : 0x10;
+    int idxOff  = gProfile.IsUsing4_22 ? 0x8 : 0x0;
+    const int CHUNK = Offsets::ObjArray::TNameChunkSize;
+    const int PS    = Offsets::PointerSize;
 
-    size_t nq = region.size() / 8;
-    if (nq > 0x200000) nq = 0x200000;
-
+    size_t nq = std::min(region.size() / 8, (size_t)0x200000);
     std::vector<int64_t> buf(nq);
     if (!ph.readMemory(region.start, buf.data(), nq * 8)) return false;
 
     for (size_t i = 0; i < buf.size() && !gFound; i++) {
-        int64_t chunkPtr = buf[i];
-        if (!chunkPtr || chunkPtr < modBase || chunkPtr > modBase + 0x20000000) continue;
+        int64_t chunk = buf[i];
+        if (!chunk || chunk < modBase || chunk > modBase + 0x20000000) continue;
+        int64_t e0 = Algorithm::ReadAs<int64_t>(ph, chunk);
+        int64_t e1 = Algorithm::ReadAs<int64_t>(ph, chunk + 8);
+        if (!e0 || !e1) continue;
 
-        int64_t entry0Ptr = Algorithm::ReadAs<int64_t>(ph, chunkPtr);
-        int64_t entry1Ptr = Algorithm::ReadAs<int64_t>(ph, chunkPtr + 8);
-        if (!entry0Ptr || !entry1Ptr) continue;
+        for (int no : {nameOff, (nameOff == 0xC ? 0x10 : 0xC)}) {
+            int32_t i0 = Algorithm::ReadAs<int32_t>(ph, e0 + idxOff);
+            char n0[32]={}; ph.readMemory(e0 + no, n0, sizeof(n0));
+            if (i0 != 0 || strcmp(n0, "None") != 0) continue;
 
-        // Try name offsets: primary (version-dependent), then alternate
-        std::vector<int> nameOffsets = {nameOffset};
-        if (nameOffset == 0xC) nameOffsets.push_back(0x10);
-        else nameOffsets.push_back(0xC);
+            int32_t i1 = Algorithm::ReadAs<int32_t>(ph, e1 + idxOff);
+            char n1[32]={}; ph.readMemory(e1 + no, n1, sizeof(n1));
+            if (i1 != 1 || strlen(n1) <= 0) continue;
 
-        for (int nOff : nameOffsets) {
-            int32_t idx0 = Algorithm::ReadAs<int32_t>(ph, entry0Ptr + indexOffset);
-            char name0[32] = {};
-            ph.readMemory(entry0Ptr + nOff, name0, sizeof(name0));
-
-            if (idx0 == 0 && strcmp(name0, "None") == 0) {
-                int32_t idx1 = Algorithm::ReadAs<int32_t>(ph, entry1Ptr + indexOffset);
-                char name1[32] = {};
-                ph.readMemory(entry1Ptr + nOff, name1, sizeof(name1));
-
-                if (idx1 == 1 && strlen(name1) > 0) {
-                    // Found valid TNameEntryArray chunk
-                    // The direct GNames pointer = region.start + i*8
-                    // BUT some games need: TNameEntryArray = getPtr(GNames) (extra deref)
-                    // OR: TNameEntryArray = getPtr(getPtr(GNames)) (double deref)
-
-                    auto directAddr = static_cast<int64_t>(region.start) + i * 8;
-
-                    // Check: does directAddr point to chunkPtr? (indirect case)
-                    // If *directAddr == chunkPtr, then GNames is indirect (needs one deref)
-                    // If directAddr itself IS the chunk array, it's direct
-
-                    // Try indirect first (GNames → ptr → TNameEntryArray[0])
-                    int64_t indirectVal = Algorithm::ReadAs<int64_t>(ph, directAddr);
-                    if (indirectVal == chunkPtr) {
-                        // GNames is a pointer TO the TNameEntryArray
-                        printf("[*] TNameEntryArray chunk at 0x%lx (indirect, nameOff=0x%x, entry[1]=%s)\n",
-                               chunkPtr, nOff, name1);
-                        printf("[*] GNames: 0x%lx (derefs to 0x%lx)\n", directAddr, chunkPtr);
-                        gProfile.GNameOffset = toOffset(directAddr, modBase);
-                        gProfile.UseFNamePool = false;
-                        gFound = true;
-                        return true;
-                    }
-
-                    // Try double-indirect (GNames → ptr → ptr → chunk)
-                    int64_t indirect2 = Algorithm::ReadAs<int64_t>(ph, indirectVal);
-                    if (indirect2 == chunkPtr) {
-                        printf("[*] TNameEntryArray chunk at 0x%lx (double-indirect, nameOff=0x%x, entry[1]=%s)\n",
-                               chunkPtr, nOff, name1);
-                        printf("[*] GNames: 0x%lx → 0x%lx → 0x%lx\n", directAddr, indirectVal, chunkPtr);
-                        gProfile.GNameOffset = toOffset(directAddr, modBase);
-                        gProfile.UseFNamePool = false;
-                        gFound = true;
-                        return true;
-                    }
-
-                    // Try direct (chunk IS at directAddr)
-                    if (chunkPtr == directAddr) {
-                        printf("[*] TNameEntryArray direct at 0x%lx (nameOff=0x%x, entry[1]=%s)\n",
-                               directAddr, nOff, name1);
-                        printf("[*] GNames: 0x%lx (direct)\n", directAddr);
-                        gProfile.GNameOffset = toOffset(directAddr, modBase);
-                        gProfile.UseFNamePool = false;
-                        gFound = true;
-                        return true;
-                    }
-                }
-            }
+            auto addr = static_cast<int64_t>(region.start) + i * 8;
+            printf("[*] TNameEntryArray at 0x%lx, GNames: 0x%lx\n", chunk, addr);
+            gProfile.GNameOffset = toOffset(addr, modBase);
+            gProfile.UseFNamePool = false;
+            gFound = true;
+            return true;
         }
     }
     return false;
@@ -481,70 +513,67 @@ bool find(const ProcessHandle& ph, int64_t moduleBase, size_t moduleSize) {
 #endif
 
 #if PLATFORM_ARM64
+    printf("[*] Scanning for GNames (%s)...\n",
+           gProfile.UseFNamePool ? "FNamePool 4.23+" : "TNameEntryArray pre-4.23");
+
+    // Count regions for debug
+    int dataRegions = 0, codeRegions = 0;
+    for (const auto& r : ph.regions) {
+        if (r.isReadable() && !r.isExecutable()) dataRegions++;
+        if (r.isReadable() && r.isExecutable()) codeRegions++;
+    }
+    printf("[*] Regions: %d data, %d code\n", dataRegions, codeRegions);
+
     if (gProfile.UseFNamePool) {
-        printf("[*] UE 4.23+ detected, scanning for FNamePool...\n");
-        printf("[-] FNamePool ARM64 scanner not yet fully implemented\n");
-    } else {
-        // Pre-4.23 TNameEntryArray: try multiple methods
-        printf("[*] Pre-4.23 detected, searching TNameEntryArray...\n");
-
-        // Count scannable regions for debug
-        int dataRegions = 0, codeRegions = 0;
+        // FNamePool: scan data sections for entry 0 = "None"
+        printf("[*] Method FNamePool: scanning data sections...\n");
+        int scanned = 0;
         for (const auto& region : ph.regions) {
-            if (region.isReadable() && !region.isExecutable()) dataRegions++;
-            if (region.isReadable() && region.isExecutable()) codeRegions++;
+            if (gFound) break;
+            if (!region.isReadable() || region.isExecutable()) continue;
+            scanned++;
+            if (region.size() > 0x400000)
+                printf("[*]   region 0x%lx-0x%lx (%zu MB)\n",
+                       region.start, region.end, region.size() / 1048576);
+            scanFNamePool(ph, region, moduleBase);
         }
-        printf("[*] Regions: %d data, %d code\n", dataRegions, codeRegions);
-
-        // Method A: scan data sections for TNameEntryArray pattern
-        printf("[*] Method A: TNameEntryArray pattern scan in data sections...\n");
+        printf("[*] FNamePool scanned %d regions, found=%d\n", scanned, (int)gFound);
+    } else {
+        // TNameEntryArray
+        printf("[*] Method A: TNameEntryArray scan in data sections...\n");
+        int scanned = 0;
         {
             std::vector<std::thread> threads;
-            int scanned = 0;
             for (const auto& region : ph.regions) {
                 if (gFound) break;
                 if (!region.isReadable() || region.isExecutable()) continue;
                 scanned++;
-                printf("[*]   scanning data region 0x%lx-0x%lx (%zu MB)...\n",
-                       region.start, region.end, region.size() / 1048576);
                 threads.emplace_back([&ph, &region, moduleBase]() {
                     scanTNameEntryArray(ph, region, moduleBase);
                 });
             }
             for (auto& t : threads) t.join();
-            printf("[*] Method A scanned %d data regions, gFound=%d\n", scanned, (int)gFound);
         }
+        printf("[*] Method A scanned %d regions, found=%d\n", scanned, (int)gFound);
 
-        // Method B: string reference scan in code sections
+        // Fallback: also try FNamePool (might be wrong about version)
         if (!gFound) {
-            printf("[*] Method B: string reference scan in code sections...\n");
-            std::vector<std::thread> threads;
-            int scanned = 0;
+            printf("[*] Fallback: trying FNamePool scan...\n");
             for (const auto& region : ph.regions) {
                 if (gFound) break;
-                if (!region.isReadable() || !region.isExecutable()) continue;
-                scanned++;
-                threads.emplace_back([&ph, &region, moduleBase]() {
-                    scanViaStringRef(ph, region, moduleBase);
-                });
+                if (!region.isReadable() || region.isExecutable()) continue;
+                scanFNamePool(ph, region, moduleBase);
             }
-            for (auto& t : threads) t.join();
-            printf("[*] Method B scanned %d code regions, gFound=%d\n", scanned, (int)gFound);
         }
+    }
 
-        // Method C: brute-force "None" scan in ALL readable regions
-        if (!gFound) {
-            printf("[*] Method C: brute-force scan in all readable regions...\n");
-            int scanned = 0;
-            for (const auto& region : ph.regions) {
-                if (gFound) break;
-                if (!region.isReadable()) continue;
-                scanned++;
-                printf("[*]   scanning region 0x%lx-0x%lx (%zu MB)...\n",
-                       region.start, region.end, region.size() / 1048576);
-                scanBruteForce(ph, region, moduleBase);
-            }
-            printf("[*] Method C scanned %d regions, gFound=%d\n", scanned, (int)gFound);
+    // Final fallback
+    if (!gFound) {
+        printf("[*] Final fallback: brute-force all readable regions...\n");
+        for (const auto& region : ph.regions) {
+            if (gFound) break;
+            if (!region.isReadable()) continue;
+            scanBruteForce(ph, region, moduleBase);
         }
     }
 #endif
