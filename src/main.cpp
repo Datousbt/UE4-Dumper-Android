@@ -24,6 +24,9 @@
 #include "linux_memory.h"
 #include "algorithm.h"
 #include "profile.h"
+#include "offsets.h"
+#include "name_system.h"
+#include "object_system.h"
 #include "ue4_scanner.h"
 
 static void printBanner() {
@@ -40,8 +43,10 @@ static void printUsage(const char* prog) {
     printf("Usage: %s <PID> [options]\n", prog);
     printf("\n");
     printf("Options:\n");
-    printf("  --ue4-version <ver>   UE4 engine version (e.g. 426 for 4.26)\n");
-    printf("  --output <name>       Output profile name (default: game profile)\n");
+    printf("  --ue4-version <ver>   UE4 engine version (e.g. 422 for 4.22)\n");
+    printf("  --output <name>       Output profile name (default: ue4_game)\n");
+    printf("  --dump-names          Dump all GNames to Names.txt\n");
+    printf("  --dump-objects        Dump all UObjects to Objects.txt\n");
     printf("  --list                 List processes (find UE4 game PID)\n");
     printf("  --help                 Show this help\n");
     printf("\n");
@@ -138,6 +143,8 @@ int main(int argc, char* argv[]) {
     // Parse optional arguments
     int engineVersion = 0;
     std::string outputName = "ue4_game";
+    bool dumpNames = false;
+    bool dumpObjects = false;
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--ue4-version") == 0 && i + 1 < argc) {
@@ -146,6 +153,10 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             outputName = argv[i + 1];
             i++;
+        } else if (strcmp(argv[i], "--dump-names") == 0) {
+            dumpNames = true;
+        } else if (strcmp(argv[i], "--dump-objects") == 0) {
+            dumpObjects = true;
         }
     }
 
@@ -203,6 +214,31 @@ int main(int argc, char* argv[]) {
     // Generate output
     printf("\n[*] Generating profile...\n");
     genProfile(outputName);
+
+    // Configure offsets and run dump features
+    if (gProfile.GNameOffset != 0 && engineVersion > 0) {
+        Offsets::configure(engineVersion);
+
+        auto* mod = ph.findUE4Module();
+        int64_t base = static_cast<int64_t>(mod->baseAddress);
+        int64_t gNamesAddr = base + gProfile.GNameOffset;
+
+        NameSystem names(ph, gNamesAddr);
+
+        // Dump names
+        if (dumpNames) {
+            printf("\n[*] Dumping GNames...\n");
+            names.dumpAll("Names.txt");
+        }
+
+        // Dump objects
+        if (dumpObjects && gProfile.GObjectOffset != 0) {
+            printf("\n[*] Dumping UObjects...\n");
+            int64_t gObjAddr = base + gProfile.GObjectOffset;
+            ObjectSystem objects(ph, gObjAddr, &names);
+            objects.dumpAll("Objects.txt");
+        }
+    }
 
     // Summary
     printf("\n");
